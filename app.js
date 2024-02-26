@@ -1,14 +1,11 @@
 // Import required modules
 const express = require('express');
 const finnhub = require('finnhub');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 require('dotenv').config()
 const { Pool } = require('pg');
 // Create an instance of Express
 const app = express();
-
-var portfolio = {}
-var portfolioValue = 0
-var portfolioAvailableCash = 0
 
 // Configure the PostgreSQL connection
 const pool = new Pool({
@@ -29,18 +26,27 @@ try {
     client.release(); // Release the client back to the pool
 }
 }
-  
+
+let portfolio = {}
+let portfolioValue = 0
+let portfolioAvailableCash = 0
 
 
 const API_KEY = process.env.API_KEY
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET
 const PORT = process.env.PORT
 
 const api_key = finnhub.ApiClient.instance.authentications['api_key'];
 api_key.apiKey = API_KEY
 const finnhubClient = new finnhub.DefaultApi()
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-1.0-pro-latest"});
 
 async function retrieveCurrentPortfolio() {
+    let portfolio = {}
+    let portfolioValue = 0
+    let portfolioAvailableCash = 0
     // Retrieve the current portfolio from the database
     let text = ''
     try {
@@ -55,29 +61,31 @@ async function retrieveCurrentPortfolio() {
     //retrieve portfolioValue
     text = 'SELECT * FROM portfolioValue';
     const responseValue = await query(text);
-    portfolioValue = responseValue.portfolioValue
+    portfolioValue = responseValue.portfolioValue || 0
     
     //retrieve portfolioAvailableCash
     text = 'SELECT * FROM portfolioAvailableCash';
     const responseCash = await query(text);
-    portfolioAvailableCash = responseCash.portfolioAvailableCash
+    portfolioAvailableCash = responseCash.portfolioAvailableCash || 0
 
     
     } catch (err) {
+        console.log('retrying...')
         retrieveCurrentPortfolio()
     }
-    return response;
+    return {portfolio: portfolio, portfolioValue: portfolioValue, portfolioAvailableCash: portfolioAvailableCash};
 
 }
 
-async function updateCurrentPortfolio() {
-    portfolioValue = 0
+async function updateCurrentPortfolio(portfolio, portfolioAvailableCash) {
+    let portfolioValue = 0
     for (let ticker in portfolio) {
         const response = await finnhubClient.quote(ticker)
         const data = await response.json()
         portfolio[ticker].price = data.last.price
         portfolioValue += data.last.price * portfolio[ticker].quantity
     }
+    console.log("Updated Portfolio:", portfolio, "Portfolio Value:", portfolioValue, "Portfolio Available Cash:", portfolioAvailableCash)
     // Update the database with the new portfolio
     let text = 'DELETE FROM portfolio';
     await query(text);
@@ -85,9 +93,14 @@ async function updateCurrentPortfolio() {
         text = 'INSERT INTO portfolio (ticker, price, quantity) VALUES ($1, $2, $3)';
         await query(text, [ticker, portfolio[ticker].price, portfolio[ticker].quantity]);
     }
+    //update portfolioValue
+    text = 'UPDATE portfolioValue SET portfolioValue = $1';
+    await query(text, [portfolioValue]);
+
     //update portfolioHistory
-    text = 'INSERT INTO portfolioValue date, portfolioValue, availableCash) VALUES ($1, $2, $3)';
-    await query(text, [Date.now(), portfolioValue, portfolioAvailableCash]);
+    text = 'INSERT INTO portfolioHistory (date, portfolioValue, availableCash) VALUES ($1, $2, $3)';
+    await query(text, [new Date().toISOString(), portfolioValue, portfolioAvailableCash]);
+
 }
 
 async function currentTickerData(ticker) {
@@ -152,7 +165,7 @@ async function currentTickerData(ticker) {
             //First 3 articles
             let currentNews = []
             for (let i = 0; i < 3; i++) {
-                currentNews.push({headline: data[i].headline, url: data[i].url, summary: data[i].summary})
+                currentNews.push({headline: data[i]?.headline, url: data[i]?.url, summary: data[i]?.summary})
             }
             resolve(currentNews)
         }
@@ -164,20 +177,20 @@ async function currentTickerData(ticker) {
             reject(error);
         } else {
             let currentFinancials = {
-                "10DayAverageTradingVolume": data.metric['10DayAverageTradingVolume'],
-                "52WeekHigh": data.metric['52WeekHigh'],
-                "52WeekHighDate": data.metric['52WeekHighDate'],
-                "52WeekLow": data.metric['52WeekLow'],
-                "52WeekLowDate": data.metric['52WeekLowDate'],
-                "beta": data.metric['beta'],
-                "bookValuePerShareQuarterly": data.metric['bookValuePerShareQuarterly'],
-                "currentRatioQuarterly": data.metric['currentRatioQuarterly'],
-                "ebitdPerShareTTM": data.metric['ebitdPerShareTTM'],
-                "epsAnnual": data.metric['epsAnnual'],
-                "epsGrowthQuarterlyYoy": data.metric['epsGrowthQuarterlyYoy'],
-                "psTTM": data.metric['psTTM'],
-                "revenuePerShareTTM": data.metric['revenuePerShareTTM'],
-                "roiTTM": data.metric['roiTTM']
+                "10DayAverageTradingVolume": data?.metric['10DayAverageTradingVolume'],
+                "52WeekHigh": data?.metric['52WeekHigh'],
+                "52WeekHighDate": data?.metric['52WeekHighDate'],
+                "52WeekLow": data?.metric['52WeekLow'],
+                "52WeekLowDate": data?.metric['52WeekLowDate'],
+                "beta": data?.metric['beta'],
+                "bookValuePerShareQuarterly": data?.metric['bookValuePerShareQuarterly'],
+                "currentRatioQuarterly": data?.metric['currentRatioQuarterly'],
+                "ebitdPerShareTTM": data?.metric['ebitdPerShareTTM'],
+                "epsAnnual": data?.metric['epsAnnual'],
+                "epsGrowthQuarterlyYoy": data?.metric['epsGrowthQuarterlyYoy'],
+                "psTTM": data?.metric['psTTM'],
+                "revenuePerShareTTM": data?.metric['revenuePerShareTTM'],
+                "roiTTM": data?.metric['roiTTM']
             }
             resolve(currentFinancials)
         }
@@ -190,7 +203,7 @@ async function currentTickerData(ticker) {
         } else {
             let insiderTransactions = []
             for (let i = 0; i < 3; i++) {
-                insiderTransactions.push({name: data[i].name, share: data[i].share, change: data[i].change})
+                insiderTransactions.push({name: data[i]?.name, share: data[i]?.share, change: data[i]?.change})
             }
             resolve(insiderTransactions)
         }
@@ -201,7 +214,7 @@ async function currentTickerData(ticker) {
         if (error) {
             reject(error);
         } else {
-            let currentRecommendation = {buy: data[0].buy, hold: data[0].hold, sell: data[0].sell, strongBuy: data[0].strongBuy, strongSell: data[0].strongSell, period: data[0].period}
+            let currentRecommendation = {buy: data[0]?.buy, hold: data[0]?.hold, sell: data[0]?.sell, strongBuy: data[0]?.strongBuy, strongSell: data[0]?.strongSell, period: data[0]?.period}
             resolve(currentRecommendation)
         }
     })});
@@ -211,7 +224,7 @@ async function currentTickerData(ticker) {
         if (error) {
             reject(error);
         } else {
-            let currentValues = {currentPrice: data.c, highDay: data.h, lowDay: data.l}
+            let currentValues = {currentPrice: data?.c, highDay: data?.h, lowDay: data?.l}
             resolve(currentValues)
         }
     })});
@@ -259,10 +272,22 @@ async function currentTickerData(ticker) {
     return stockInformation
 }
 
-function promptFormatter(stockInformation) {
+function promptFormatter(stockInformation, inPortfolio=false) {
+    let portfolioInformation = ``
+    if (inPortfolio) {
+        portfolioInformation = 
+        `This stock is currently in your portfolio. Currently you have ${portfolio[stockInformation.ticker].quantity} shares of ${stockInformation.ticker} at a price of ${portfolio[stockInformation.ticker].price} per share.
+        Your last recommendation was to ${portfolio[stockInformation.ticker].recommendation} with a confidence of ${portfolio[stockInformation.ticker].confidence} on ${portfolio[stockInformation.ticker].date}.
+        `
+    }
+    else {
+        portfolioInformation = `This stock is not currently in your portfolio.`
+    }
     let prompt = `Here is the information for ${stockInformation.ticker} I want you to return the confidence of buying this stock based on the following information and telling me if you would buy, hold, or sell this stock. 
-    Only tell me in this format: "[BUY || HOLD || SELL, decimal confidence 0-1]".
-    Here is the information for ${stockInformation.ticker}:
+    !IMPORTANT! Only reply to this prompt in this format: ["BUY" || "HOLD" || "SELL", decimal confidence 0-1].
+    ${portfolioInformation}
+    Here is the current information for ${stockInformation.ticker}:
+    The Current Date Is: ${new Date().toISOString().split('T')[0]} 
     10 Day Average Trading Volume: ${stockInformation.financials["10DayAverageTradingVolume"]}
     52 Week High: ${stockInformation.financials["52WeekHigh"]} on ${stockInformation.financials["52WeekHighDate"]}
     52 Week Low: ${stockInformation.financials["52WeekLow"]} on ${stockInformation.financials["52WeekLowDate"]}
@@ -275,12 +300,81 @@ function promptFormatter(stockInformation) {
     PS TTM: ${stockInformation.financials["psTTM"]}
     Revenue Per Share TTM: ${stockInformation.financials["revenuePerShareTTM"]}
     ROI TTM: ${stockInformation.financials["roiTTM"]}
-    News: ${JSON.stringify(stockInformation.news) || null}
-    Insider Transactions: ${JSON.stringify(stockInformation.insiderTransactions) || null}
-    Recommendation: ${JSON.stringify(stockInformation.recommendation) || null}
-    Quote: ${JSON.stringify(stockInformation.quote) || null}`
+    News: ${JSON.stringify(stockInformation.news)}
+    Insider Transactions: ${JSON.stringify(stockInformation.insiderTransactions)}
+    Recommendation: ${JSON.stringify(stockInformation.recommendation)}
+    Quote: ${JSON.stringify(stockInformation.quote)}
+    Remember! Only reply with: ["BUY" || "HOLD" || "SELL", decimal confidence 0-1]`
     return prompt
 }
+
+async function queryLLM(prompt) {
+    const model = genAI.getGenerativeModel({ model: "gemini-1.0-pro-latest"});
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const text = response.text();
+    return text
+
+}
+
+function formatLLMResponse(response) {
+    try {
+        let beginningIndex = response.indexOf("[")
+        let endingIndex = response.indexOf("]")
+        let formattedResponse = response.substring(beginningIndex, endingIndex+1)
+        return JSON.parse(formattedResponse)
+
+    }
+    catch (err) {
+        console.log("Error formatting LLM response, improper response format")
+        console.log("Response:", response)
+        return null
+    }
+
+}
+
+async function filterStockTicker(ticker) {
+    let stockInformation = await currentTickerData(ticker)
+    let prompt = promptFormatter(stockInformation)
+    console.log("Formatted Financials:\n", prompt)
+    let response = await queryLLM(prompt)
+    let formattedResponse = formatLLMResponse(response)
+    console.log(formattedResponse)
+    return formattedResponse
+
+}
+
+async function marketStatus() {
+
+    function withTimeout(promise, timeout) {
+        return Promise.race([
+          promise,
+          new Promise((resolve, reject) => {
+            setTimeout(() => {
+              reject(new Error('Timeout'));
+            }, timeout);
+          })
+        ]);
+    }
+
+    const marketStatusPromise = new Promise((resolve, reject) => {
+        finnhubClient.marketStatus("US", (error, data, response) => {
+        if (error) {
+            reject(error);
+        } else {
+            let marketOpen = data?.isOpen
+            return marketOpen
+        }
+    })});
+
+    await withTimeout(marketStatusPromise, 5000)
+    .then((value) => {
+        return value
+    })
+}
+
+
     
 
 // Define a sample route
@@ -296,13 +390,21 @@ app.listen(PORT, () => {
 
 // Example usage
 async function main() {
-    let currentTickerInformation = await currentTickerData('NVDA')
-    let prompt = promptFormatter(currentTickerInformation)
-    console.log(prompt)
-    //  retrieveCurrentPortfolio()
-    // console.log(portfolio)
-    // console.log(portfolioValue)
-
+    // retrieveCurrentPortfolio().then((response) => {
+    //     portfolio = response.portfolio
+    //     portfolioValue = response.portfolioValue
+    //     portfolioAvailableCash = response.portfolioAvailableCash
+    // })
+    // .catch((err) => {
+    //     console.log("Error retrieving current portfolio")
+    // })
+    // console.log("Current Portfolio:", portfolio)
+    // console.log("Portfolio Value:", portfolioValue)
+    // console.log("Portfolio Available Cash:", portfolioAvailableCash)
+    // //create an async timer function for updating portfolio
+    // setInterval(updateCurrentPortfolio, 60000)
+    filterStockTicker("DWAC")
+    
 }
   
 main();
