@@ -73,7 +73,6 @@ const PORT = process.env.PORT
 const api_key = finnhub.ApiClient.instance.authentications['api_key'];
 api_key.apiKey = API_KEY
 const finnhubClient = new finnhub.DefaultApi()
-const fmp = require('financialmodelingprep')(FMP_API_KEY)
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: MODEL_NAME});
 
@@ -610,13 +609,19 @@ async function randomTrendingStocks(n) {
         let randomIndex = Math.floor(Math.random() * trendingStocks.length)
         if (!trendingStocks[randomIndex]["symbol"].includes(".") && !trendingStocks[randomIndex]["symbol"].includes("-")){
             let randomTicker = trendingStocks[randomIndex]["symbol"]
-            selectedStocks.push(randomTicker)
+            if (selectedStocks.includes(randomTicker)) {
+                i-=1
+            }
+            else {
+                selectedStocks.push(randomTicker)
+            }
         }
         else {
             console.log("\nNot a valid stock exchange", trendingStocks[randomIndex]["symbol"])
             i-=1
         }
     }
+
     return selectedStocks
 }
 
