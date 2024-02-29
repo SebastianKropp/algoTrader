@@ -1,6 +1,8 @@
 // Import required modules
 const express = require('express');
 const finnhub = require('finnhub');
+const nodemailer = require("nodemailer");
+const { google } = require('googleapis');
 const https = require('https')
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const { GoogleGenerativeAI } = require("@google/generative-ai");
@@ -87,31 +89,53 @@ async function retrieveCurrentPortfolio() {
     const response = await query(text);
     portfolioValue = 0
     for (let row of response) {
-        portfolio[row.ticker] = {"price": row.price, "quantity": row.quantity, "priceBoughtAverage": row.priceBoughtAverage, "recommendation": row.recommendation, "confidence": row.confidence, "date": row.date}
-        portfolioValue += row.value * row.quantity
+        portfolio[row.ticker] = {"price": row.price, "quantity": row.quantity, "priceBoughtAverage": row.priceboughtaverage, "recommendation": row.recommendation, "confidence": row.confidence, "date": row.date}
     }
 
     //retrieve portfolioValue
     text = 'SELECT * FROM portfolioValue';
     const responseValue = await query(text);
-    portfolioValue = responseValue.portfolioValue || 0
+    if (responseValue.length !== 0) {
+        portfolioValue = responseValue[0].portfoliovalue || 0
+    }
+    else {
+        portfolioValue = 0
+    }
     
     //retrieve portfolioAvailableCash
     text = 'SELECT * FROM portfolioAvailableCash';
     const responseCash = await query(text);
-    portfolioAvailableCash = responseCash.portfolioAvailableCash || 0
-
-    
-    } catch (err) {
-        console.log('retrying...')
-        await new Promise(resolve => setTimeout(resolve, 10000));
-        retrieveCurrentPortfolio()
+    if (responseCash.length !== 0) {
+        portfolioAvailableCash = responseCash[0].availablecash || 0
     }
+    else {
+        portfolioAvailableCash = 0
+    
+    }
+} 
+    catch (err) {
+        console.log('retrying...')
+        console.log(err)
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        return retrieveCurrentPortfolio()
+    }
+    console.log("\nRetrieved Portfolio:\n", portfolio, "\nPortfolio Value:\n", portfolioValue, "\nPortfolio Available Cash:\n", portfolioAvailableCash)
     return {portfolio: portfolio, portfolioValue: portfolioValue, portfolioAvailableCash: portfolioAvailableCash};
 
 }
 
 async function updateCurrentPortfolio(portfolio, portfolioValue, portfolioAvailableCash) {
+    function percentageGainStock(priceBoughtAverage, currentPrice) {
+        return ((currentPrice - priceBoughtAverage) / priceBoughtAverage) * 100
+    }
+    function truncateDecimals(number, digits) {
+        var multiplier = Math.pow(10, digits),
+            adjustedNum = number * multiplier,
+            truncatedNum = Math[adjustedNum < 0 ? 'ceil' : 'floor'](adjustedNum);
+    
+        return truncatedNum / multiplier;
+    };
+    
     function withTimeout(promise, timeout) {
         return Promise.race([
           promise,
@@ -123,7 +147,7 @@ async function updateCurrentPortfolio(portfolio, portfolioValue, portfolioAvaila
         ]);
     }
     portfolioValue = 0
-    for (let ticker in portfolio) {
+    for (let ticker of Object.keys(portfolio)) {
         let tickerValue = 0
         const quotePromise = new Promise((resolve, reject) => {
             finnhubClient.quote(ticker, (error, data, response) => {
@@ -145,18 +169,30 @@ async function updateCurrentPortfolio(portfolio, portfolioValue, portfolioAvaila
     let text = 'DELETE FROM portfolio';
     await query(text);
     for (let ticker in portfolio) {
-        text = 'INSERT INTO portfolio (ticker, price, priceBoughtAverage, quantity, recommendation, confidence, date) VALUES ($1, $2, $3, $4, $5, $6, $7)';
+        text = 'INSERT INTO portfolio (ticker, price, priceboughtaverage, quantity, recommendation, confidence, date) VALUES ($1, $2, $3, $4, $5, $6, $7)';
         await query(text, [ticker, portfolio[ticker].price, portfolio[ticker].priceBoughtAverage, portfolio[ticker].quantity, portfolio[ticker].recommendation, portfolio[ticker].confidence, portfolio[ticker].date]);
     }
+    text = 'DELETE FROM portfolioValue';
+    await query(text);
     //update portfolioValue
-    text = 'UPDATE portfolioValue SET portfolioValue = $1';
+    text = 'INSERT INTO portfolioValue (portfoliovalue) VALUES ($1)';
     await query(text, [portfolioValue]);
+    text = 'DELETE FROM portfolioAvailableCash';
+    await query(text);
+    text = 'INSERT INTO portfolioAvailableCash (availablecash) VALUES ($1)';
+    await query(text, [portfolioAvailableCash]);
 
     //update portfolioHistory
     text = 'INSERT INTO portfolioHistory (date, portfolioValue, availableCash) VALUES ($1, $2, $3)';
     await query(text, [new Date().toISOString(), portfolioValue, portfolioAvailableCash]);
     //console.log("\nUpdated Portfolio:\n", portfolio, "\nPortfolio Value:\n", portfolioValue, "\nPortfolio Available Cash:\n", portfolioAvailableCash)
-    let percentageGainOrLoss = ((portfolioValue + portfolioAvailableCash - 10000)/ 10000) * 100
+    let percentageGainOrLoss = truncateDecimals(((portfolioValue + portfolioAvailableCash - 10000)/ 10000) * 100, 3)
+    let percentageDifferencePerStock = ''
+    for (let ticker in portfolio) {
+        let percentageDifference = percentageGainStock(portfolio[ticker].priceBoughtAverage, portfolio[ticker].price)
+        let percentageWord = percentageDifference > 0 ? "gain" : "loss"
+        percentageDifferencePerStock += `\n        ${ticker} has a ${percentageWord} of ${truncateDecimals(percentageDifference, 1)}% for a value difference of ${truncateDecimals(portfolio[ticker].quantity*portfolio[ticker].price - portfolio[ticker].quantity*portfolio[ticker].priceBoughtAverage, 2)}\n`
+    }
     let oofMeter = ''
     if (percentageGainOrLoss > 0) {
         let oofMeter = 'Nice! You\'re kinda good gemini'
@@ -164,18 +200,26 @@ async function updateCurrentPortfolio(portfolio, portfolioValue, portfolioAvaila
     else {
         let oofMeter = 'Oof! You\'re kinda trash gemini'
     }
-    console.log(
+    let currentPortfolioString = ``
+    for (let ticker in portfolio) {
+        currentPortfolioString += `\n        ${ticker} bought @ ${portfolio[ticker].priceBoughtAverage} and a quantity of ${portfolio[ticker].quantity} for a total value of ${portfolio[ticker].price * portfolio[ticker].quantity}\n        Confidence of ${portfolio[ticker].confidence} and a recommendation of ${portfolio[ticker].recommendation} on ${portfolio[ticker].date.toISOString()}\n`
+    }
+
+
+
+        console.log(
         `
         -------------------------
         --- Portfolio Updated ---
         -------------------------
         - Total Portfolio Value -
         -------------------------
-        $${portfolioValue + portfolioAvailableCash} in total
-        $${portfolioValue} in stocks
-        $${portfolioAvailableCash} in cash
+        $${truncateDecimals(portfolioValue + portfolioAvailableCash, 2)} in Total
+        $${truncateDecimals(portfolioValue, 2)} in Stock
+        $${truncateDecimals(portfolioAvailableCash, 2)} in Cash
         -------------------------
-        Percentage Change: ${(portfolioValue + portfolioAvailableCash - 10000)/ 10000}%
+        Percentage Change: ${percentageGainOrLoss}% Value Difference: ${truncateDecimals(portfolioValue + portfolioAvailableCash - 10000, 2)}
+        ${percentageDifferencePerStock}
         ${oofMeter}
         `)
     console.log(
@@ -183,7 +227,7 @@ async function updateCurrentPortfolio(portfolio, portfolioValue, portfolioAvaila
         -------------------------
         --- Current Portfolio ---
         -------------------------
-        ${JSON.stringify(portfolio)}
+        ${currentPortfolioString}
         -------------------------
         `
     )
@@ -450,6 +494,7 @@ async function stockRecommendation(ticker, attempts=0, average=[]) {
         let confidenceAverage = 0
         for (let index in recommendations) {
             if (action !== '' && action !== recommendations[index].action[0]) {
+                console.log("Not Enough Confidence To Create An Action: ", ticker)
                 return {"ticker": ticker, "action": []}
             }
             action = recommendations[index].action[0]
@@ -528,11 +573,14 @@ function calculateSellQuantity(quantity, confidenceInterval, availableCash) {
 
 async function collectAndExecuteStockActions(portfolio, portfolioValue, portfolioAvailableCash) {
     let selectedStocks = await randomTrendingStocks(5)
-    for(let index in portfolio) {
-        selectedStocks.push(portfolio[index].ticker)
+    if (Object.keys(portfolio).length > 0) {
+        for(let ticker of Object.keys(portfolio)) {
+            selectedStocks.push(ticker)
+        }
     }
     let recommendations = []
     console.log('\nCurrently Selected Stocks For Filtering: ', selectedStocks)
+    
     for (let stock of selectedStocks) {
         let recommendation = await stockRecommendation(stock)
         if (recommendation !== undefined && recommendation.action.length > 0) {
@@ -602,7 +650,7 @@ async function randomTrendingStocks(n) {
         port: 443,
         path: `/api/v3/stock_market/actives?apikey=${FMP_API_KEY}`,
         method: 'GET'
-      }
+    }
 
     trendingStocks = await doRequest(options);
     for (i = 0; i < n; i+=1) {
@@ -633,30 +681,27 @@ app.listen(PORT, () => {
 
 // Example usage
 async function main() {
-    retrieveCurrentPortfolio().then((response) => {
-        portfolio = response.portfolio
-        portfolioValue = response.portfolioValue
-        portfolioAvailableCash = response.portfolioAvailableCash
-    })
+    let updatedPortfolio = await retrieveCurrentPortfolio()
     .catch((err) => {
         console.log("Error retrieving current portfolio")
     })
-    let updatedPortfolio = {portfolio: portfolio, portfolioValue: portfolioValue, portfolioAvailableCash: portfolioAvailableCash}
     //set interval to 10 seconds
-    async function intervalFunc(updatatedPortfolio) {
-        if (Object.keys(portfolio).length !== 0) {
+    async function intervalFunc(updatedPortfolio) {
+        console.log("The Portfolio Is:", updatedPortfolio)
+        if (Object.keys(updatedPortfolio.portfolio).length !== 0) {
             await updateCurrentPortfolio(updatedPortfolio.portfolio, updatedPortfolio.portfolioValue, updatedPortfolio.portfolioAvailableCash)
         }
-        else if (Object.keys(portfolio).length === 0 && portfolioAvailableCash === 0){
-            console.log("No portfolio found, skipping update")
-            console.log("Adding fake money to portfolio")
+        else if (Object.keys(updatedPortfolio.portfolio).length === 0 && updatedPortfolio.portfolioAvailableCash === 0){
+            console.log("No portfolio found, skipping update...")
+            console.log("Adding money to portfolio...")
             updatedPortfolio.portfolio = {}
             updatedPortfolio.portfolioValue = 0
             updatedPortfolio.portfolioAvailableCash = 10000
         }
-
         updatedPortfolio = await collectAndExecuteStockActions(updatedPortfolio.portfolio, updatedPortfolio.portfolioValue, updatedPortfolio.portfolioAvailableCash)
+        console.log("The Portfolio Is:", updatedPortfolio)
         updatedPortfolio = await updateCurrentPortfolio(updatedPortfolio.portfolio, updatedPortfolio.portfolioValue, updatedPortfolio.portfolioAvailableCash)
+        console.log("The Portfolio Is:", updatedPortfolio)
         //create a timer
         await new Promise(resolve => setTimeout(resolve, 60000));
         intervalFunc(updatedPortfolio)
