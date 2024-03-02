@@ -624,7 +624,7 @@ function calculateSellQuantity(quantity, confidenceInterval, availableCash) {
     const maxBuyQuantity = Math.floor(maxSpend / price);
   
     // Return the quantity to buy
-    return Math.round(buyMultiplier * maxBuyQuantity); 
+    return buyMultiplier * maxBuyQuantity
   }
 
 async function collectAndExecuteStockActions(portfolio, portfolioValue, portfolioAvailableCash) {
@@ -688,14 +688,12 @@ async function marketStatus() {
             reject(error);
         } else {
             let marketOpen = data?.isOpen
-            console.log(marketOpen)
             resolve(marketOpen)
         }
     })});
     let marketStatus = false
     await withTimeout(marketStatusPromise, 10000)
     .then((value) => {
-        console.log("OkaY")
         marketStatus = value
     })
     return marketStatus
@@ -747,6 +745,7 @@ async function main() {
     //set interval to 10 seconds
     async function intervalFunc(updatedPortfolio) {
         let isOpen = await marketStatus()
+        console.log("Market Status: ", isOpen)
         if (isOpen) {
             if (Object.keys(updatedPortfolio.portfolio).length !== 0) {
                 await updateCurrentPortfolio(updatedPortfolio.portfolio, updatedPortfolio.portfolioValue, updatedPortfolio.portfolioAvailableCash)
