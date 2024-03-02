@@ -71,6 +71,12 @@ const MODEL_NAME = process.env.MODEL_NAME
 const FMP_API_KEY = process.env.FMP_API_KEY
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET
 const PORT = process.env.PORT
+const EMAIL_USER = process.env.EMAIL_USER
+const EMAIL_PASSWORD = process.env.EMAIL_PASSWORD
+const EMAIL_CLIENT_ID = process.env.EMAIL_CLIENT_ID
+const EMAIL_CLIENT_SECRET = process.env.EMAIL_CLIENT_SECRET
+const EMAIL_REDIRECT_URL = process.env.EMAIL_REDIRECT_URL
+const EMAIL_APP_PASSWORD = process.env.EMAIL_APP_PASSWORD
 
 const api_key = finnhub.ApiClient.instance.authentications['api_key'];
 api_key.apiKey = API_KEY
@@ -78,6 +84,26 @@ const finnhubClient = new finnhub.DefaultApi()
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: MODEL_NAME});
 
+// Create a transporter object using your Gmail SMTP credentials
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: EMAIL_USER,
+      pass: EMAIL_APP_PASSWORD
+    }
+  });
+  
+
+  const oAuth2Client = new google.auth.OAuth2(
+    EMAIL_CLIENT_ID,
+    EMAIL_CLIENT_SECRET,
+    EMAIL_REDIRECT_URL
+  );
+  // Generate an authentication URL
+const authUrl = oAuth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: ['https://www.googleapis.com/auth/gmail.send']
+  });
 async function retrieveCurrentPortfolio() {
     let portfolio = {}
     let portfolioValue = 0
@@ -207,7 +233,7 @@ async function updateCurrentPortfolio(portfolio, portfolioValue, portfolioAvaila
 
 
 
-        console.log(
+        let portfolioUpdate = 
         `
         -------------------------
         --- Portfolio Updated ---
@@ -221,8 +247,8 @@ async function updateCurrentPortfolio(portfolio, portfolioValue, portfolioAvaila
         Percentage Change: ${percentageGainOrLoss}% Value Difference: ${truncateDecimals(portfolioValue + portfolioAvailableCash - 10000, 2)}
         ${percentageDifferencePerStock}
         ${oofMeter}
-        `)
-    console.log(
+        `
+    let portfolioStocks=
         `
         -------------------------
         --- Current Portfolio ---
@@ -230,7 +256,37 @@ async function updateCurrentPortfolio(portfolio, portfolioValue, portfolioAvaila
         ${currentPortfolioString}
         -------------------------
         `
-    )
+    console.log(portfolioUpdate)
+    console.log(portfolioStocks)
+
+    try {
+        // Exchange authorization code for access token
+        // const { tokens } = await oAuth2Client.getToken(code);
+        // oAuth2Client.setCredentials(tokens);
+    
+        // Create a Nodemailer transporter using Gmail OAuth2
+        const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: {
+                user: EMAIL_USER,
+                pass: EMAIL_APP_PASSWORD
+            }
+        });
+        
+    
+        send(portfolioUpdate, portfolioStocks);
+
+        async function send() {
+            const result = await transporter.sendMail({
+                from: EMAIL_USER,
+                to: EMAIL_USER,
+                subject: `Portfolio Update: ${new Date().toISOString()}`,
+                text: `${portfolioUpdate}\n${portfolioStocks}`
+            });
+        }
+    } catch (err) {
+        console.log(err);
+    }
 
     return {portfolio: portfolio, portfolioValue: portfolioValue, portfolioAvailableCash: portfolioAvailableCash};
 
@@ -620,7 +676,7 @@ async function marketStatus() {
           promise,
           new Promise((resolve, reject) => {
             setTimeout(() => {
-              reject(new Error('Timeout'));
+              console.log("Failed to retrieve market status!")
             }, timeout);
           })
         ]);
@@ -632,14 +688,17 @@ async function marketStatus() {
             reject(error);
         } else {
             let marketOpen = data?.isOpen
-            return marketOpen
+            console.log(marketOpen)
+            resolve(marketOpen)
         }
     })});
-
-    await withTimeout(marketStatusPromise, 5000)
+    let marketStatus = false
+    await withTimeout(marketStatusPromise, 10000)
     .then((value) => {
-        return value
+        console.log("OkaY")
+        marketStatus = value
     })
+    return marketStatus
 }
 
 async function randomTrendingStocks(n) {
@@ -687,24 +746,25 @@ async function main() {
     })
     //set interval to 10 seconds
     async function intervalFunc(updatedPortfolio) {
-        console.log("The Portfolio Is:", updatedPortfolio)
-        if (Object.keys(updatedPortfolio.portfolio).length !== 0) {
-            await updateCurrentPortfolio(updatedPortfolio.portfolio, updatedPortfolio.portfolioValue, updatedPortfolio.portfolioAvailableCash)
+        let isOpen = await marketStatus()
+        if (isOpen) {
+            if (Object.keys(updatedPortfolio.portfolio).length !== 0) {
+                await updateCurrentPortfolio(updatedPortfolio.portfolio, updatedPortfolio.portfolioValue, updatedPortfolio.portfolioAvailableCash)
+            }
+            else if (Object.keys(updatedPortfolio.portfolio).length === 0 && updatedPortfolio.portfolioAvailableCash === 0){
+                console.log("No portfolio found, skipping update...")
+                console.log("Adding money to portfolio...")
+                updatedPortfolio.portfolio = {}
+                updatedPortfolio.portfolioValue = 0
+                updatedPortfolio.portfolioAvailableCash = 10000
+            }
+            updatedPortfolio = await collectAndExecuteStockActions(updatedPortfolio.portfolio, updatedPortfolio.portfolioValue, updatedPortfolio.portfolioAvailableCash)
+            updatedPortfolio = await updateCurrentPortfolio(updatedPortfolio.portfolio, updatedPortfolio.portfolioValue, updatedPortfolio.portfolioAvailableCash)
         }
-        else if (Object.keys(updatedPortfolio.portfolio).length === 0 && updatedPortfolio.portfolioAvailableCash === 0){
-            console.log("No portfolio found, skipping update...")
-            console.log("Adding money to portfolio...")
-            updatedPortfolio.portfolio = {}
-            updatedPortfolio.portfolioValue = 0
-            updatedPortfolio.portfolioAvailableCash = 10000
-        }
-        updatedPortfolio = await collectAndExecuteStockActions(updatedPortfolio.portfolio, updatedPortfolio.portfolioValue, updatedPortfolio.portfolioAvailableCash)
-        console.log("The Portfolio Is:", updatedPortfolio)
-        updatedPortfolio = await updateCurrentPortfolio(updatedPortfolio.portfolio, updatedPortfolio.portfolioValue, updatedPortfolio.portfolioAvailableCash)
-        console.log("The Portfolio Is:", updatedPortfolio)
         //create a timer
-        await new Promise(resolve => setTimeout(resolve, 60000));
+        await new Promise(resolve => setTimeout(resolve, 3600000));
         intervalFunc(updatedPortfolio)
+
     }
     intervalFunc(updatedPortfolio)
 
