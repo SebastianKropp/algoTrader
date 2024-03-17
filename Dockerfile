@@ -14,4 +14,4 @@ RUN npm install
 COPY . .
 
 # Command to run the application
-CMD ["node", "app.js"]
+CMD ["node", "-r", "dotenv/config", "src/app.js"]
